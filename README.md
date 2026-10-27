@@ -20,6 +20,8 @@ The classes are very uneven (91.6% / 6.6% / 1.7%), so a model that always says "
 
 ## What I did
 
+![Pipeline: raw MEPS files to R pipeline to Python modeling to Streamlit dashboard](docs/images/pipeline.png)
+
 1. **Built the dataset from raw MEPS files.** Parsed fixed-width files using their SAS layout files, and merged
    five file types per panel: person-level, medical conditions, prescriptions, inpatient stays, and ER visits.
 2. **Engineered features:** chronic-condition flags from ICD-9 codes, unique medication counts and a
