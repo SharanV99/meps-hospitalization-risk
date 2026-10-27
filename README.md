@@ -39,6 +39,8 @@ The classes are very uneven (91.6% / 6.6% / 1.7%), so a model that always says "
 | Random Forest | **0.844** | 52.1% | 51.1% |
 | XGBoost | 0.828 | 36.5% | **54.5%** |
 
+Numbers are from the notebooks; the dashboard retrains live and may differ by about 1–2 points due to library versions.
+
 No single model wins everything: Random Forest ranks risk best overall, while logistic regression catches the most
 repeat-admission patients. Across all models, **ER visits, number of medications, self-rated health, and age** were the
 most consistent signals.
@@ -49,6 +51,8 @@ most consistent signals.
   risk stratification, not advance prediction. The natural next step is predicting Year 2 admissions from Year 1 data.
 - **No survey weights.** Results describe the MEPS sample; national estimates would need MEPS survey weights.
 - **Small rare class.** Only 167 "Multiple" cases in the test set, from a single train/test split.
+- **Childbirth stays.** 70% of single-stay adults are female versus 54% overall, likely reflecting childbirth admissions;
+  separating pregnancy-related stays from illness-related ones is a natural next step.
 - **Older data.** 2001–2006 data uses ICD-9 codes, so findings may not reflect current care patterns.
 
 ## Repository structure
@@ -71,9 +75,10 @@ data/README.md                  Which MEPS files to download
    pip install -r requirements.txt
    ```
    They save model results to `outputs/`.
-4. Launch the dashboard from the repository root:
+4. Launch the dashboard from the repository root (it only needs `data/processed/final_for_modeling.csv`;
+   it retrains the three models with the notebooks' exact settings, which takes about a minute the first time):
    ```
-   streamlit run dashboard/app.py
+   python3 -m streamlit run dashboard/app.py
    ```
 
 ---
