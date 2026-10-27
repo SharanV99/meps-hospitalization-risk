@@ -5,6 +5,8 @@ A three-class model that sorts adults into **no**, **one**, or **multiple** hosp
 
 **Portfolio write-up:** [sharanv99.github.io](https://sharanv99.github.io)
 
+![Streamlit dashboard](docs/images/dashboard-hero.png)
+
 ---
 
 ## Why three classes?
@@ -26,6 +28,9 @@ The classes are very uneven (91.6% / 6.6% / 1.7%), so a model that always says "
 3. **Caught a data leak.** Total healthcare spending looked like a strong predictor, but it already includes the
    cost of the hospital stays being predicted. Removing it dropped Macro AUC by 0.13–0.16, which showed how much
    of the apparent accuracy was leakage. All final models exclude it.
+
+   ![Leakage check: Macro AUC with and without total spending](docs/images/dashboard-leak.png)
+
 4. **Compared ways to handle imbalance.** SMOTE vs. class weights: class weights caught far more repeat-admission
    patients (62.9% vs. 38.3% recall), without generating synthetic patient records.
 5. **Compared three models** (elastic-net logistic regression, Random Forest, XGBoost) and explained them with SHAP.
@@ -45,6 +50,8 @@ No single model wins everything: Random Forest ranks risk best overall, while lo
 repeat-admission patients. Across all models, **ER visits, number of medications, self-rated health, and age** were the
 most consistent signals.
 
+![Random Forest: top features by SHAP importance for each class](docs/images/shap-random-forest.png)
+
 ## Limitations
 
 - **Same-year timing.** Predictors (such as ER visits) and the outcome come from the same survey year, so this is
@@ -62,6 +69,7 @@ most consistent signals.
 02_logistic_regression.ipynb    Leakage test and SMOTE vs. class weights (4 configurations)
 03_random_forest_xgboost.ipynb  Random Forest, XGBoost, SHAP, final model comparison
 dashboard/app.py                Streamlit dashboard
+docs/images/                    Screenshots used in this README
 data/README.md                  Which MEPS files to download
 ```
 
