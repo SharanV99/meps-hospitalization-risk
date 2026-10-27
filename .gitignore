@@ -1,0 +1,20 @@
+# Raw and processed MEPS data (download from AHRQ, see data/README.md)
+data/raw/
+data/processed/
+*.dat
+*.DAT
+*.csv
+!outputs/*.csv
+
+# Model files
+outputs/*.pkl
+
+# R / Python / OS clutter
+.Rhistory
+.RData
+.Rproj.user/
+*.html
+__pycache__/
+.ipynb_checkpoints/
+.venv/
+.DS_Store

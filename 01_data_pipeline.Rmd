@@ -1,0 +1,958 @@
+---
+title: "MEPS Data Pipeline and Exploratory Analysis"
+subtitle: "Building Comprehensive Dataset for Hospitalization Prediction"
+author: "Sharan Venkatesh"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+**Primary Research Question:** Can we predict which adults are likely to be hospitalized based on their demographic characteristics, health status, chronic conditions, and healthcare utilization patterns?
+
+# Data Description
+
+The analysis integrates five types of MEPS data files:
+
+1. **Longitudinal Files (Panels 6-10)** - Person-level consolidated data including demographics, insurance coverage, health status, and utilization summaries
+2. **Medical Condition Files (2001-2006)** - ICD-9 diagnosis codes used to identify chronic conditions and exclude cancer patients
+3. **Prescribed Medicine Files (2001-2006)** - Prescription records used to calculate medication counts and polypharmacy status
+4. **Inpatient Stay Files (2001-2006)** - Hospital admission records
+5. **Emergency Room Files (2001-2006)** - ER visit records
+
+# Data Preprocessing
+
+## Setup and File Paths
+
+```{r packages}
+# Required packages
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(stringr)
+```
+
+```{r paths}
+# File paths are relative to the repository root (where this file lives).
+# Download the raw MEPS files first: see data/README.md
+
+long_path <- "data/raw/longitudinal"
+cond_path <- "data/raw/conditions"
+rx_path <- "data/raw/prescribed_meds"
+ip_path <- "data/raw/inpatient"
+er_path <- "data/raw/er_visits"
+```
+
+## Functions for Loading MEPS Data
+
+MEPS data files are distributed in fixed-width format, where each variable occupies specific character positions. The following functions parse the SAS programming statements files to determine column positions, then load the data accordingly.
+
+```{r load-functions}
+# Parse SAS input statements to extract variable positions
+get_var_positions <- function(sas_file) {
+  
+  lines <- readLines(sas_file, warn = FALSE)
+  
+  # Variable definitions start with @ followed by position number
+  pos_lines <- lines[grep("^\\s*@\\d+", lines)]
+  
+  vars <- data.frame(
+    name = character(),
+    start = integer(),
+    width = integer(),
+    type = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (line in pos_lines) {
+    # Pattern: @position variable_name $optional width
+    parts <- regmatches(line, regexec("@(\\d+)\\s+(\\w+)\\s*(\\$)?\\s*(\\d+)", line))[[1]]
+    
+    if (length(parts) >= 5) {
+      vars <- rbind(vars, data.frame(
+        name = parts[3],
+        start = as.integer(parts[2]),
+        width = as.integer(parts[5]),
+        type = ifelse(parts[4] == "$", "c", "d"),
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+  
+  return(vars)
+}
+
+# Load MEPS fixed-width data file using parsed positions
+read_meps_file <- function(dat_file, sas_file) {
+  
+  var_info <- get_var_positions(sas_file)
+  
+  if (nrow(var_info) == 0) {
+    stop("Could not parse variable definitions from SAS file")
+  }
+  
+  col_pos <- fwf_positions(
+    start = var_info$start,
+    end = var_info$start + var_info$width - 1,
+    col_names = var_info$name
+  )
+  
+  df <- read_fwf(
+    dat_file,
+    col_positions = col_pos,
+    col_types = paste(var_info$type, collapse = ""),
+    progress = FALSE
+  )
+  
+  return(df)
+}
+```
+
+## Load Longitudinal Panel Files
+
+```{r load-longitudinal}
+# Load all five longitudinal panels
+p6 <- read_meps_file(file.path(long_path, "h71.dat"), file.path(long_path, "h71su.txt"))
+cat("Panel 6 (2001-2002):", nrow(p6), "persons\n")
+
+p7 <- read_meps_file(file.path(long_path, "h80.dat"), file.path(long_path, "h80su.txt"))
+cat("Panel 7 (2002-2003):", nrow(p7), "persons\n")
+
+p8 <- read_meps_file(file.path(long_path, "h86.dat"), file.path(long_path, "h86su.txt"))
+cat("Panel 8 (2003-2004):", nrow(p8), "persons\n")
+
+p9 <- read_meps_file(file.path(long_path, "h98.dat"), file.path(long_path, "h98su.txt"))
+cat("Panel 9 (2004-2005):", nrow(p9), "persons\n")
+
+p10 <- read_meps_file(file.path(long_path, "h106.dat"), file.path(long_path, "h106su.txt"))
+cat("Panel 10 (2005-2006):", nrow(p10), "persons\n")
+
+total_n <- nrow(p6) + nrow(p7) + nrow(p8) + nrow(p9) + nrow(p10)
+cat("\nTotal across all panels:", total_n, "persons\n")
+```
+
+## Load Medical Condition Files
+
+The condition files contain ICD-9 diagnosis codes which are used to identify chronic conditions and flag cancer patients for exclusion.
+
+```{r load-conditions}
+cond01 <- read_meps_file(file.path(cond_path, "H61.dat"), file.path(cond_path, "h61su.txt"))
+cond02 <- read_meps_file(file.path(cond_path, "H69.dat"), file.path(cond_path, "h69su.txt"))
+cond03 <- read_meps_file(file.path(cond_path, "H78.dat"), file.path(cond_path, "h78su.txt"))
+cond04 <- read_meps_file(file.path(cond_path, "H87.dat"), file.path(cond_path, "h87su.txt"))
+cond05 <- read_meps_file(file.path(cond_path, "H96.dat"), file.path(cond_path, "h96su.txt"))
+cond06 <- read_meps_file(file.path(cond_path, "H104.dat"), file.path(cond_path, "h104su.txt"))
+
+cat("Condition records by year:\n")
+cat("2001:", nrow(cond01), "\n")
+cat("2002:", nrow(cond02), "\n")
+cat("2003:", nrow(cond03), "\n")
+cat("2004:", nrow(cond04), "\n")
+cat("2005:", nrow(cond05), "\n")
+cat("2006:", nrow(cond06), "\n")
+
+all_conds <- bind_rows(cond01, cond02, cond03, cond04, cond05, cond06)
+cat("\nTotal condition records:", nrow(all_conds), "\n")
+```
+
+## Load Prescribed Medicine Files
+
+Each record represents one prescription fill. These files are used to count unique medications per person and identify polypharmacy (5+ medications).
+
+```{r load-rx}
+rx01 <- read_meps_file(file.path(rx_path, "H59A.DAT"), file.path(rx_path, "h59asu.txt"))
+rx02 <- read_meps_file(file.path(rx_path, "H67A.DAT"), file.path(rx_path, "h67asu.txt"))
+rx03 <- read_meps_file(file.path(rx_path, "H77A.DAT"), file.path(rx_path, "h77asu.txt"))
+rx04 <- read_meps_file(file.path(rx_path, "H85A.DAT"), file.path(rx_path, "h85asu.txt"))
+rx05 <- read_meps_file(file.path(rx_path, "H94A.DAT"), file.path(rx_path, "h94asu.txt"))
+rx06 <- read_meps_file(file.path(rx_path, "H102A.DAT"), file.path(rx_path, "h102asu.txt"))
+
+cat("Prescription records by year:\n")
+cat("2001:", nrow(rx01), "\n")
+cat("2002:", nrow(rx02), "\n")
+cat("2003:", nrow(rx03), "\n")
+cat("2004:", nrow(rx04), "\n")
+cat("2005:", nrow(rx05), "\n")
+cat("2006:", nrow(rx06), "\n")
+
+all_rx <- bind_rows(rx01, rx02, rx03, rx04, rx05, rx06)
+cat("\nTotal prescription records:", nrow(all_rx), "\n")
+```
+
+## Load Inpatient and ER Files
+
+```{r load-events}
+# Inpatient stays
+ip01 <- read_meps_file(file.path(ip_path, "H59D.DAT"), file.path(ip_path, "h59dsu.txt"))
+ip02 <- read_meps_file(file.path(ip_path, "H67D.dat"), file.path(ip_path, "h67dsu.txt"))
+ip03 <- read_meps_file(file.path(ip_path, "H77D.dat"), file.path(ip_path, "h77dsu.txt"))
+ip04 <- read_meps_file(file.path(ip_path, "H85D.dat"), file.path(ip_path, "h85dsu.txt"))
+ip05 <- read_meps_file(file.path(ip_path, "H94D.dat"), file.path(ip_path, "h94dsu.txt"))
+ip06 <- read_meps_file(file.path(ip_path, "H102D.dat"), file.path(ip_path, "h102dsu.txt"))
+
+total_ip <- nrow(ip01) + nrow(ip02) + nrow(ip03) + nrow(ip04) + nrow(ip05) + nrow(ip06)
+cat("Total inpatient stay records:", total_ip, "\n")
+
+# ER visits
+er01 <- read_meps_file(file.path(er_path, "H59E.dat"), file.path(er_path, "h59esu.txt"))
+er02 <- read_meps_file(file.path(er_path, "H67E.dat"), file.path(er_path, "h67esu.txt"))
+er03 <- read_meps_file(file.path(er_path, "H77E.dat"), file.path(er_path, "h77esu.txt"))
+er04 <- read_meps_file(file.path(er_path, "H85E.dat"), file.path(er_path, "h85esu.txt"))
+er05 <- read_meps_file(file.path(er_path, "H94E.dat"), file.path(er_path, "h94esu.txt"))
+er06 <- read_meps_file(file.path(er_path, "H102E.dat"), file.path(er_path, "h102esu.txt"))
+
+total_er <- nrow(er01) + nrow(er02) + nrow(er03) + nrow(er04) + nrow(er05) + nrow(er06)
+cat("Total ER visit records:", total_er, "\n")
+```
+
+## Create Chronic Condition Flags
+
+Using ICD-9 diagnosis codes from the condition files to create binary flags for major chronic conditions. The code ranges are based on standard ICD-9-CM classifications.
+
+```{r chronic-conditions}
+# Function to extract numeric ICD-9 category code
+get_icd_num <- function(code) {
+  if (is.na(code)) return(NA)
+  cleaned <- gsub("[^0-9]", "", substr(as.character(code), 1, 3))
+  if (cleaned == "") return(NA)
+  return(as.numeric(cleaned))
+}
+
+# Create condition flags for each person based on their diagnoses
+chronic_flags <- all_conds %>%
+  mutate(icd_num = sapply(ICD9CODX, get_icd_num)) %>%
+  group_by(DUPERSID) %>%
+  summarise(
+    # Cancer (140-239) - for exclusion
+    has_cancer = as.integer(any(icd_num >= 140 & icd_num <= 239, na.rm = TRUE)),
+    
+    # Diabetes (250)
+    has_diabetes = as.integer(any(icd_num == 250, na.rm = TRUE)),
+    
+    # Hypertension (401-405)
+    has_hypertension = as.integer(any(icd_num >= 401 & icd_num <= 405, na.rm = TRUE)),
+    
+    # Heart disease (410-429)
+    has_heart_disease = as.integer(any(icd_num >= 410 & icd_num <= 429, na.rm = TRUE)),
+    
+    # COPD and respiratory disease (490-496)
+    has_copd = as.integer(any(icd_num >= 490 & icd_num <= 496, na.rm = TRUE)),
+    
+    # Depression and anxiety disorders (296, 300, 311)
+    has_depression = as.integer(any(icd_num %in% c(296, 300, 311), na.rm = TRUE)),
+    
+    # Arthritis (714-716)
+    has_arthritis = as.integer(any(icd_num >= 714 & icd_num <= 716, na.rm = TRUE)),
+    
+    # Stroke and cerebrovascular disease (430-438)
+    has_stroke = as.integer(any(icd_num >= 430 & icd_num <= 438, na.rm = TRUE)),
+    
+    .groups = "drop"
+  )
+
+# Calculate total number of chronic conditions per person
+chronic_flags <- chronic_flags %>%
+  mutate(
+    num_conditions = has_diabetes + has_hypertension + has_heart_disease + 
+                     has_copd + has_depression + has_arthritis + has_stroke
+  )
+
+cat("Chronic condition flags created for", nrow(chronic_flags), "unique persons\n\n")
+
+cat("Condition prevalence in raw data:\n")
+cat("Cancer (for exclusion):", sum(chronic_flags$has_cancer), "\n")
+cat("Diabetes:", sum(chronic_flags$has_diabetes), "\n")
+cat("Hypertension:", sum(chronic_flags$has_hypertension), "\n")
+cat("Heart Disease:", sum(chronic_flags$has_heart_disease), "\n")
+cat("COPD:", sum(chronic_flags$has_copd), "\n")
+cat("Depression:", sum(chronic_flags$has_depression), "\n")
+cat("Arthritis:", sum(chronic_flags$has_arthritis), "\n")
+cat("Stroke:", sum(chronic_flags$has_stroke), "\n")
+```
+
+## Create Medication Counts and Polypharmacy Indicator
+
+Polypharmacy, defined as concurrent use of 5 or more medications, is a known risk factor for adverse health outcomes including hospitalization.
+
+```{r medications}
+# Count unique medications per person using NDC codes
+med_counts <- all_rx %>%
+  group_by(DUPERSID) %>%
+  summarise(
+    num_rx_fills = n(),
+    num_unique_meds = n_distinct(RXNDC, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Create polypharmacy indicator
+med_counts <- med_counts %>%
+  mutate(polypharmacy = ifelse(num_unique_meds >= 5, 1, 0))
+
+cat("Medication data processed for", nrow(med_counts), "persons\n")
+cat("Persons with polypharmacy (5+ medications):", sum(med_counts$polypharmacy), "\n")
+cat("Mean unique medications:", round(mean(med_counts$num_unique_meds), 2), "\n")
+```
+
+## Process Longitudinal Panel Data
+
+This function extracts and standardizes variables from each longitudinal panel. Some variable names differ slightly across panels, so the function accounts for these variations.
+
+```{r process-function}
+clean_panel <- function(df, panel_num) {
+  
+  cols <- names(df)
+  
+  # First, add placeholder columns for variables that might not exist
+  # This prevents errors when referencing columns that don't exist in some panels
+  if (!"RACETHX" %in% cols) df$RACETHX <- NA
+  if (!"RACEX" %in% cols) df$RACEX <- NA
+  if (!"MARRY1X" %in% cols) df$MARRY1X <- NA
+  if (!"EMPST1" %in% cols) df$EMPST1 <- NA
+  if (!"RTHLTH31" %in% cols) df$RTHLTH31 <- NA
+  if (!"RTHLTH3" %in% cols) df$RTHLTH3 <- NA
+  if (!"MNHLTH31" %in% cols) df$MNHLTH31 <- NA
+  if (!"MNHLTH3" %in% cols) df$MNHLTH3 <- NA
+  if (!"ACTLIM1" %in% cols) df$ACTLIM1 <- NA
+  if (!"OBTOTY1" %in% cols) df$OBTOTY1 <- NA
+  if (!"OBDTOT1" %in% cols) df$OBDTOT1 <- NA
+  
+  result <- df %>%
+    mutate(
+      panel = panel_num,
+      
+      # Response variable: any hospitalization in Year 1
+      hospitalized = ifelse(IPDISY1 >= 1 & IPDISY1 < 99, 1, 0),
+      # Multi-class response variable (NEW) -------------------------------------
+      hosp_class = case_when(
+        IPDISY1 < 0 ~ NA_integer_,
+        IPDISY1 == 0 ~ 0L,
+        IPDISY1 == 1 ~ 1L,
+        IPDISY1 >= 2 ~ 2L
+      ),
+      
+      # Demographics
+      age = ifelse(AGEY1X >= 0, AGEY1X, NA),
+      female = ifelse(SEX == 2, 1, 0),
+      
+      race = case_when(
+        !is.na(RACETHX) & RACETHX == 1 ~ "Hispanic",
+        !is.na(RACETHX) & RACETHX == 2 ~ "White",
+        !is.na(RACETHX) & RACETHX == 3 ~ "Black",
+        !is.na(RACETHX) & RACETHX == 4 ~ "Asian",
+        !is.na(RACETHX) & RACETHX >= 5 ~ "Other",
+        !is.na(RACEX) & RACEX == 1 ~ "White",
+        !is.na(RACEX) & RACEX == 2 ~ "Black",
+        !is.na(RACEX) & RACEX >= 3 ~ "Other",
+        TRUE ~ NA_character_
+      ),
+      
+      region = case_when(
+        REGION1 == 1 ~ "Northeast",
+        REGION1 == 2 ~ "Midwest",
+        REGION1 == 3 ~ "South",
+        REGION1 == 4 ~ "West",
+        REGION1 < 0 ~ NA_character_,
+        TRUE ~ NA_character_
+      ),
+      
+      married = case_when(
+        !is.na(MARRY1X) & MARRY1X == 1 ~ 1,
+        !is.na(MARRY1X) & MARRY1X > 1 & MARRY1X < 9 ~ 0,
+        TRUE ~ NA_real_
+      ),
+      
+      # Socioeconomic factors
+      insurance = case_when(
+        INSCOVY1 == 1 ~ "Private",
+        INSCOVY1 == 2 ~ "Public",
+        INSCOVY1 == 3 ~ "Uninsured",
+        TRUE ~ NA_character_
+      ),
+      
+      poverty_cat = case_when(
+        POVCATY1 == 1 ~ "Poor",
+        POVCATY1 == 2 ~ "Near Poor",
+        POVCATY1 == 3 ~ "Low Income",
+        POVCATY1 == 4 ~ "Middle Income",
+        POVCATY1 == 5 ~ "High Income",
+        TRUE ~ NA_character_
+      ),
+      
+      employed = case_when(
+        !is.na(EMPST1) & EMPST1 == 1 ~ 1,
+        !is.na(EMPST1) & EMPST1 > 1 & EMPST1 < 99 ~ 0,
+        TRUE ~ NA_real_
+      ),
+      
+      # Health status variables
+      health_status = case_when(
+        !is.na(RTHLTH31) & RTHLTH31 == 1 ~ "Excellent",
+        !is.na(RTHLTH31) & RTHLTH31 == 2 ~ "Very Good",
+        !is.na(RTHLTH31) & RTHLTH31 == 3 ~ "Good",
+        !is.na(RTHLTH31) & RTHLTH31 == 4 ~ "Fair",
+        !is.na(RTHLTH31) & RTHLTH31 == 5 ~ "Poor",
+        !is.na(RTHLTH3) & RTHLTH3 == 1 ~ "Excellent",
+        !is.na(RTHLTH3) & RTHLTH3 == 2 ~ "Very Good",
+        !is.na(RTHLTH3) & RTHLTH3 == 3 ~ "Good",
+        !is.na(RTHLTH3) & RTHLTH3 == 4 ~ "Fair",
+        !is.na(RTHLTH3) & RTHLTH3 == 5 ~ "Poor",
+        TRUE ~ NA_character_
+      ),
+      
+      mental_health = case_when(
+        !is.na(MNHLTH31) & MNHLTH31 == 1 ~ "Excellent",
+        !is.na(MNHLTH31) & MNHLTH31 == 2 ~ "Very Good",
+        !is.na(MNHLTH31) & MNHLTH31 == 3 ~ "Good",
+        !is.na(MNHLTH31) & MNHLTH31 == 4 ~ "Fair",
+        !is.na(MNHLTH31) & MNHLTH31 == 5 ~ "Poor",
+        !is.na(MNHLTH3) & MNHLTH3 == 1 ~ "Excellent",
+        !is.na(MNHLTH3) & MNHLTH3 == 2 ~ "Very Good",
+        !is.na(MNHLTH3) & MNHLTH3 == 3 ~ "Good",
+        !is.na(MNHLTH3) & MNHLTH3 == 4 ~ "Fair",
+        !is.na(MNHLTH3) & MNHLTH3 == 5 ~ "Poor",
+        TRUE ~ NA_character_
+      ),
+      
+      has_limitation = case_when(
+        !is.na(ACTLIM1) & ACTLIM1 == 1 ~ 1,
+        !is.na(ACTLIM1) & ACTLIM1 == 2 ~ 0,
+        TRUE ~ NA_real_
+      ),
+      
+      # Utilization measures
+      er_visits = ifelse(ERTOTY1 >= 0, ERTOTY1, NA),
+      
+      office_visits = case_when(
+        !is.na(OBTOTY1) & OBTOTY1 >= 0 ~ OBTOTY1,
+        !is.na(OBDTOT1) & OBDTOT1 >= 0 ~ OBDTOT1,
+        TRUE ~ NA_real_
+      ),
+      
+      total_exp = ifelse(TOTEXPY1 >= 0, TOTEXPY1, NA)
+    )
+  
+  result <- result %>%
+    select(DUPERSID, panel, hospitalized, hosp_class, age, female, race, region, married,
+           insurance, poverty_cat, employed, health_status, mental_health,
+           has_limitation, er_visits, office_visits, total_exp)
+  
+  return(result)
+}
+```
+
+```{r process-panels}
+# Process each panel
+cat("Processing longitudinal panels...\n\n")
+
+p6_clean <- clean_panel(p6, 6)
+p7_clean <- clean_panel(p7, 7)
+p8_clean <- clean_panel(p8, 8)
+p9_clean <- clean_panel(p9, 9)
+p10_clean <- clean_panel(p10, 10)
+
+# Combine all panels
+all_panels <- bind_rows(p6_clean, p7_clean, p8_clean, p9_clean, p10_clean)
+cat("Combined panel data:", nrow(all_panels), "records\n")
+```
+
+## Apply Filters and Merge Data Sources
+
+```{r filter-merge}
+cat("Applying study population filters...\n\n")
+cat("Starting sample:", nrow(all_panels), "\n")
+
+# Filter to adults only (age 18+)
+adults <- all_panels %>% 
+  filter(age >= 18)
+cat("After restricting to adults (18+):", nrow(adults), "\n")
+
+# Merge chronic condition flags
+adults <- adults %>%
+  left_join(chronic_flags, by = "DUPERSID")
+
+# Exclude cancer patients
+no_cancer <- adults %>%
+  filter(is.na(has_cancer) | has_cancer == 0)
+cat("After excluding cancer patients:", nrow(no_cancer), "\n")
+
+# Merge medication data
+final_df <- no_cancer %>%
+  left_join(med_counts %>% select(DUPERSID, num_unique_meds, polypharmacy), 
+            by = "DUPERSID")
+
+# Replace NA values with 0 for persons with no recorded conditions/medications
+final_df <- final_df %>%
+  mutate(
+    has_diabetes = ifelse(is.na(has_diabetes), 0, has_diabetes),
+    has_hypertension = ifelse(is.na(has_hypertension), 0, has_hypertension),
+    has_heart_disease = ifelse(is.na(has_heart_disease), 0, has_heart_disease),
+    has_copd = ifelse(is.na(has_copd), 0, has_copd),
+    has_depression = ifelse(is.na(has_depression), 0, has_depression),
+    has_arthritis = ifelse(is.na(has_arthritis), 0, has_arthritis),
+    has_stroke = ifelse(is.na(has_stroke), 0, has_stroke),
+    num_conditions = ifelse(is.na(num_conditions), 0, num_conditions),
+    num_unique_meds = ifelse(is.na(num_unique_meds), 0, num_unique_meds),
+    polypharmacy = ifelse(is.na(polypharmacy), 0, polypharmacy)
+  ) %>%
+  select(-has_cancer)
+
+# Add multi-class label
+final_df <- final_df %>%
+  mutate(
+    hosp_class_label = case_when(
+      hosp_class == 0 ~ "None",
+      hosp_class == 1 ~ "Single",
+      hosp_class == 2 ~ "Multiple"
+    ),
+    hosp_class_label = factor(hosp_class_label, levels = c("None", "Single", "Multiple"))
+  )
+
+cat("\nFinal analytic dataset:", nrow(final_df), "observations,", ncol(final_df), "variables\n")
+```
+
+# Final Dataset Summary
+
+## Overview
+
+```{r summary-overview}
+cat("============================================\n")
+cat("FINAL ANALYTIC DATASET\n")
+cat("============================================\n\n")
+
+cat("Total observations:", nrow(final_df), "\n")
+cat("Total variables:", ncol(final_df), "\n\n")
+
+cat("Distribution by panel:\n")
+print(table(final_df$panel))
+```
+
+## Response Variable
+
+```{r response-summary}
+cat("\nHospitalization (Response Variable):\n")
+print(table(final_df$hospitalized, useNA = "ifany"))
+
+hosp_rate <- mean(final_df$hospitalized, na.rm = TRUE) * 100
+cat("\nOverall hospitalization rate:", round(hosp_rate, 1), "%\n")
+```
+
+The hospitalization rate of approximately 8% is consistent with the preliminary analysis from Panels 6-7 conducted in Week 2.
+
+## Demographic Variables
+
+```{r demo-summary}
+cat("Age:\n")
+summary(final_df$age)
+
+cat("\nSex (Female = 1):\n")
+print(table(final_df$female, useNA = "ifany"))
+
+cat("\nRace/Ethnicity:\n")
+print(table(final_df$race, useNA = "ifany"))
+
+cat("\nRegion:\n")
+print(table(final_df$region, useNA = "ifany"))
+
+cat("\nInsurance Status:\n")
+print(table(final_df$insurance, useNA = "ifany"))
+
+cat("\nPoverty Category:\n")
+print(table(final_df$poverty_cat, useNA = "ifany"))
+```
+
+## Health Status Variables
+
+```{r health-summary}
+cat("Self-Reported Health Status:\n")
+print(table(final_df$health_status, useNA = "ifany"))
+
+cat("\nMental Health Status:\n")
+print(table(final_df$mental_health, useNA = "ifany"))
+```
+
+## Chronic Condition Variables
+
+```{r condition-summary}
+cat("Chronic Condition Prevalence:\n\n")
+
+cond_vars <- c("has_diabetes", "has_hypertension", "has_heart_disease", 
+               "has_copd", "has_depression", "has_arthritis", "has_stroke")
+
+for (var in cond_vars) {
+  n <- sum(final_df[[var]])
+  pct <- round(mean(final_df[[var]]) * 100, 1)
+  label <- gsub("has_", "", var)
+  cat(sprintf("%-15s: %5d (%4.1f%%)\n", label, n, pct))
+}
+
+cat("\nNumber of Chronic Conditions:\n")
+print(table(final_df$num_conditions))
+```
+
+Hypertension is the most prevalent chronic condition at approximately 16%, followed by depression and heart disease. The distribution of multimorbidity shows that a substantial portion of the population has multiple chronic conditions.
+
+## Medication Variables
+
+```{r med-summary}
+cat("Number of Unique Medications:\n")
+summary(final_df$num_unique_meds)
+
+poly_n <- sum(final_df$polypharmacy)
+poly_pct <- round(mean(final_df$polypharmacy) * 100, 1)
+cat("\nPolypharmacy (5+ medications):", poly_n, "(", poly_pct, "%)\n")
+```
+
+## Save Final Dataset
+
+```{r save-data}
+dir.create("data/processed", recursive = TRUE, showWarnings = FALSE)
+
+# Modeling file read by the notebooks and the dashboard.
+# office_visits is not used as a predictor, so it is left out.
+write.csv(final_df %>% select(-office_visits),
+          "data/processed/final_for_modeling.csv", row.names = FALSE)
+
+cat("Final dataset saved to data/processed/final_for_modeling.csv\n")
+```
+
+# Analysis Methodology
+
+## Exploratory Data Analysis
+
+To examine the relationship between the newly created variables (chronic conditions, polypharmacy) and hospitalization, I calculated hospitalization rates across different subgroups.
+
+### Hospitalization by Number of Chronic Conditions
+
+```{r eda-conditions}
+by_conditions <- final_df %>%
+  group_by(num_conditions) %>%
+  summarise(
+    n = n(),
+    hospitalized = sum(hospitalized, na.rm = TRUE),
+    rate = round(hospitalized / n * 100, 1),
+    .groups = "drop"
+  )
+
+kable(by_conditions, col.names = c("Chronic Conditions", "N", "Hospitalized", "Rate (%)"))
+```
+
+There is a clear dose-response relationship between the number of chronic conditions and hospitalization rate. Individuals with no chronic conditions have a hospitalization rate of approximately 4%, while those with 4 or more conditions have rates exceeding 25%.
+
+```{r plot-conditions, fig.width=9, fig.height=5}
+ggplot(by_conditions, aes(x = factor(num_conditions), y = rate, fill = factor(num_conditions))) +
+  geom_col() +
+  geom_text(aes(label = paste0(rate, "%")), vjust = -0.3, size = 3.5) +
+  labs(
+    title = "Hospitalization Rate by Number of Chronic Conditions",
+    subtitle = "MEPS Panels 6-10 (2001-2006), Adults without Cancer",
+    x = "Number of Chronic Conditions",
+    y = "Hospitalization Rate (%)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  ylim(0, max(by_conditions$rate) + 5)
+```
+
+### Hospitalization by Polypharmacy Status
+
+```{r eda-polypharmacy}
+by_poly <- final_df %>%
+  mutate(poly_label = ifelse(polypharmacy == 1, "5+ Medications", "< 5 Medications")) %>%
+  group_by(poly_label) %>%
+  summarise(
+    n = n(),
+    hospitalized = sum(hospitalized, na.rm = TRUE),
+    rate = round(hospitalized / n * 100, 1),
+    .groups = "drop"
+  )
+
+kable(by_poly, col.names = c("Polypharmacy Status", "N", "Hospitalized", "Rate (%)"))
+```
+
+Individuals with polypharmacy have nearly three times the hospitalization rate compared to those taking fewer than 5 medications.
+
+```{r plot-polypharmacy, fig.width=7, fig.height=5}
+ggplot(by_poly, aes(x = poly_label, y = rate, fill = poly_label)) +
+  geom_col(width = 0.5) +
+  geom_text(aes(label = paste0(rate, "%")), vjust = -0.3, size = 4) +
+  labs(
+    title = "Hospitalization Rate by Polypharmacy Status",
+    subtitle = "Polypharmacy defined as 5 or more unique medications",
+    x = "",
+    y = "Hospitalization Rate (%)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  ylim(0, 25)
+```
+
+### Hospitalization by Self-Reported Health Status
+
+```{r eda-health}
+by_health <- final_df %>%
+  filter(!is.na(health_status)) %>%
+  group_by(health_status) %>%
+  summarise(
+    n = n(),
+    hospitalized = sum(hospitalized, na.rm = TRUE),
+    rate = round(hospitalized / n * 100, 1),
+    .groups = "drop"
+  )
+
+by_health$health_status <- factor(by_health$health_status, 
+                                   levels = c("Excellent", "Very Good", "Good", "Fair", "Poor"))
+by_health <- by_health %>% arrange(health_status)
+
+kable(by_health, col.names = c("Health Status", "N", "Hospitalized", "Rate (%)"))
+```
+
+```{r plot-health, fig.width=9, fig.height=5}
+ggplot(by_health, aes(x = health_status, y = rate, fill = health_status)) +
+  geom_col() +
+  geom_text(aes(label = paste0(rate, "%")), vjust = -0.3, size = 3.5) +
+  labs(
+    title = "Hospitalization Rate by Self-Reported Health Status",
+    subtitle = "MEPS Panels 6-10 (2001-2006), Adults without Cancer",
+    x = "Health Status",
+    y = "Hospitalization Rate (%)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  ylim(0, 35)
+```
+
+The gradient from Excellent to Poor health status shows a strong relationship with hospitalization risk, consistent with findings from the Week 2 analysis.
+
+### Hospitalization by Insurance Status
+
+```{r eda-insurance}
+by_insurance <- final_df %>%
+  filter(!is.na(insurance)) %>%
+  group_by(insurance) %>%
+  summarise(
+    n = n(),
+    hospitalized = sum(hospitalized, na.rm = TRUE),
+    rate = round(hospitalized / n * 100, 1),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(rate))
+
+kable(by_insurance, col.names = c("Insurance", "N", "Hospitalized", "Rate (%)"))
+```
+
+```{r plot-insurance, fig.width=8, fig.height=5}
+ggplot(by_insurance, aes(x = reorder(insurance, -rate), y = rate, fill = insurance)) +
+  geom_col() +
+  geom_text(aes(label = paste0(rate, "%")), vjust = -0.3, size = 4) +
+  labs(
+    title = "Hospitalization Rate by Insurance Status",
+    subtitle = "MEPS Panels 6-10 (2001-2006), Adults without Cancer",
+    x = "Insurance Status",
+    y = "Hospitalization Rate (%)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  ylim(0, 20)
+```
+
+# Conclusion
+
+## Summary
+
+This week's work expanded the dataset and added clinically relevant variables:
+
+1. **Expanded data scope** - Loaded all five longitudinal panels (6-10) covering 2001-2006, increasing the sample size substantially compared to the Week 2 analysis which used only Panels 6-7.
+
+2. **Integrated multiple data sources** - Combined data from longitudinal files, medical condition files, and prescribed medicine files to create a comprehensive analytic dataset.
+
+3. **Created chronic condition flags** - Derived binary indicators for seven major chronic conditions (diabetes, hypertension, heart disease, COPD, depression, arthritis, stroke) using ICD-9 diagnosis codes.
+
+4. **Created medication variables** - Calculated unique medication counts and polypharmacy indicator from prescription records.
+
+5. **Built final analytic dataset** - Merged all variables and applied study filters (adults only, cancer patients excluded), resulting in a dataset with 25 variables.
+
+
+# Part B: Transition to Multi-Class Classification
+
+## Rationale for Multi-Class Approach
+
+The binary classification treats all hospitalizations equally, but clinically there are meaningful differences. Single hospitalizations may represent planned procedures or acute events, while multiple hospitalizations often indicate chronic disease complications or readmissions. This section examines the new 3-class response variable.
+
+## Multi-Class Distribution
+```{r multiclass-distribution}
+cat("Multi-Class Hospitalization Distribution:\n\n")
+
+multiclass_table <- final_df %>%
+  filter(!is.na(hosp_class_label)) %>%
+  group_by(hosp_class_label) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(percentage = round(n / sum(n) * 100, 1))
+
+kable(multiclass_table, 
+      col.names = c("Class", "N", "Percentage (%)"),
+      caption = "Distribution of Hospitalization Intensity Classes")
+```
+```{r fig-multiclass-dist, fig.width=8, fig.height=5}
+ggplot(multiclass_table, aes(x = hosp_class_label, y = n, fill = hosp_class_label)) +
+  geom_col() +
+  geom_text(aes(label = paste0(n, "\n(", percentage, "%)")), vjust = -0.2, size = 3.5) +
+  labs(
+    title = "Distribution of Hospitalization Intensity Classes",
+    subtitle = "MEPS Panels 6-10 (2001-2006), Adults without Cancer",
+    x = "Hospitalization Class",
+    y = "Number of Adults"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = c("None" = "#4DAF4A", "Single" = "#377EB8", "Multiple" = "#E41A1C")) +
+  ylim(0, max(multiclass_table$n) * 1.15)
+```
+
+## Multi-Class by Insurance Status
+```{r multiclass-insurance}
+by_insurance_multi <- final_df %>%
+  filter(!is.na(insurance) & !is.na(hosp_class_label)) %>%
+  group_by(insurance, hosp_class_label) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(insurance) %>%
+  mutate(
+    total = sum(n),
+    percentage = round(n / total * 100, 1)
+  ) %>%
+  ungroup()
+
+insurance_wide <- by_insurance_multi %>%
+  select(insurance, hosp_class_label, percentage) %>%
+  pivot_wider(names_from = hosp_class_label, values_from = percentage)
+
+kable(insurance_wide, 
+      caption = "Hospitalization Class Distribution by Insurance Status (%)")
+```
+```{r fig-multiclass-insurance, fig.width=10, fig.height=6}
+ggplot(by_insurance_multi, aes(x = insurance, y = percentage, fill = hosp_class_label)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = paste0(percentage, "%")), 
+            position = position_dodge(width = 0.9), vjust = -0.3, size = 3) +
+  labs(
+    title = "Hospitalization Class Distribution by Insurance Status",
+    subtitle = "MEPS Panels 6-10 (2001-2006), Adults without Cancer",
+    x = "Insurance Status",
+    y = "Percentage (%)",
+    fill = "Hospitalization\nClass"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(values = c("None" = "#4DAF4A", "Single" = "#377EB8", "Multiple" = "#E41A1C")) +
+  ylim(0, 100)
+```
+
+## Multi-Class by Health Status
+```{r multiclass-health}
+by_health_multi <- final_df %>%
+  filter(!is.na(health_status) & !is.na(hosp_class_label)) %>%
+  mutate(health_status = factor(health_status, 
+                                 levels = c("Excellent", "Very Good", "Good", "Fair", "Poor"))) %>%
+  group_by(health_status, hosp_class_label) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(health_status) %>%
+  mutate(
+    total = sum(n),
+    percentage = round(n / total * 100, 1)
+  ) %>%
+  ungroup()
+
+health_wide <- by_health_multi %>%
+  select(health_status, hosp_class_label, percentage) %>%
+  pivot_wider(names_from = hosp_class_label, values_from = percentage)
+
+kable(health_wide, 
+      caption = "Hospitalization Class Distribution by Self-Reported Health Status (%)")
+```
+```{r fig-multiclass-health, fig.width=12, fig.height=6}
+ggplot(by_health_multi, aes(x = health_status, y = percentage, fill = hosp_class_label)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = paste0(percentage, "%")), 
+            position = position_dodge(width = 0.9), vjust = -0.3, size = 3) +
+  labs(
+    title = "Hospitalization Class Distribution by Self-Reported Health Status",
+    subtitle = "MEPS Panels 6-10 (2001-2006), Adults without Cancer",
+    x = "Health Status",
+    y = "Percentage (%)",
+    fill = "Hospitalization\nClass"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(values = c("None" = "#4DAF4A", "Single" = "#377EB8", "Multiple" = "#E41A1C")) +
+  ylim(0, 100)
+```
+
+## Multi-Class by Number of Chronic Conditions
+```{r multiclass-conditions}
+by_conditions_multi <- final_df %>%
+  filter(!is.na(hosp_class_label)) %>%
+  mutate(conditions_group = case_when(
+    num_conditions == 0 ~ "0",
+    num_conditions == 1 ~ "1",
+    num_conditions == 2 ~ "2",
+    num_conditions >= 3 ~ "3+"
+  )) %>%
+  group_by(conditions_group, hosp_class_label) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(conditions_group) %>%
+  mutate(
+    total = sum(n),
+    percentage = round(n / total * 100, 1)
+  ) %>%
+  ungroup() %>%
+  mutate(conditions_group = factor(conditions_group, levels = c("0", "1", "2", "3+")))
+
+kable(by_conditions_multi %>%
+        select(conditions_group, hosp_class_label, percentage) %>%
+        pivot_wider(names_from = hosp_class_label, values_from = percentage),
+      caption = "Hospitalization Class Distribution by Number of Chronic Conditions (%)")
+```
+```{r fig-multiclass-conditions, fig.width=10, fig.height=6}
+ggplot(by_conditions_multi, aes(x = conditions_group, y = percentage, fill = hosp_class_label)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = paste0(percentage, "%")), 
+            position = position_dodge(width = 0.9), vjust = -0.3, size = 3) +
+  labs(
+    title = "Hospitalization Class Distribution by Number of Chronic Conditions",
+    subtitle = "MEPS Panels 6-10 (2001-2006), Adults without Cancer",
+    x = "Number of Chronic Conditions",
+    y = "Percentage (%)",
+    fill = "Hospitalization\nClass"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(values = c("None" = "#4DAF4A", "Single" = "#377EB8", "Multiple" = "#E41A1C")) +
+  ylim(0, 100)
+```
+
+## Summary Statistics by Hospitalization Class
+```{r summary-by-class}
+summary_by_class <- final_df %>%
+  filter(!is.na(hosp_class_label)) %>%
+  group_by(hosp_class_label) %>%
+  summarise(
+    N = n(),
+    Mean_Age = round(mean(age, na.rm = TRUE), 1),
+    Pct_Female = round(mean(female, na.rm = TRUE) * 100, 1),
+    Mean_Conditions = round(mean(num_conditions, na.rm = TRUE), 2),
+    Pct_Polypharmacy = round(mean(polypharmacy, na.rm = TRUE) * 100, 1),
+    Mean_ER_Visits = round(mean(er_visits, na.rm = TRUE), 2),
+    Median_Expenditure = round(median(total_exp, na.rm = TRUE), 0),
+    .groups = "drop"
+  )
+
+kable(summary_by_class,
+      col.names = c("Class", "N", "Mean Age", "% Female", "Mean Conditions", 
+                    "% Polypharmacy", "Mean ER Visits", "Median Expenditure ($)"),
+      caption = "Summary Statistics by Hospitalization Class")
+```
+
