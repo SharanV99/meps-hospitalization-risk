@@ -3,7 +3,7 @@
 A three-class model that sorts adults into **no**, **one**, or **multiple** hospital stays, built on
 50,733 adults from the Medical Expenditure Panel Survey (MEPS, Panels 6–10, 2001–2006).
 
-**Portfolio write-up:** [sharanv99.github.io](https://sharanv99.github.io)
+**Portfolio write-up:** [sharanvenkatesh.github.io](https://sharanvenkatesh.github.io)
 
 ![Streamlit dashboard](docs/images/dashboard-hero.png)
 
